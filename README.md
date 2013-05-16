@@ -1,4 +1,4 @@
 fun_python
 ==========
 
-Fun scripts in python
+Various fun scripts in python
