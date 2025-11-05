@@ -1,82 +1,107 @@
-#import ast
+import ast
 import inspect
 import itertools
 import textwrap
-#from contextlib import ExitStack
+from functools import partial
 
 
-class Stop(Exception):
+class _Stop(Exception):
     pass
 
 
-class Catch:
+class _BlockArguments:
+    def __iter__(self):
+        raise _Stop
+
+
+class _Block:
+    def __init__(self, exit_callable=None):
+        self.exit_callable = exit_callable
+
     def __enter__(self):
-        return self
-
-    def __exit__(self, cls, exc, tb):
-        if cls and issubclass(cls, Stop):
-            return True
-
-
-class Block:
-    def __enter__(self):
-        #print(inspect.stack())
-        #print(inspect.trace())
-        #print(inspect.currentframe())
-        #print(inspect.getouterframes(inspect.currentframe()))
-        #print(inspect.getsource(inspect.currentframe()))
-        #print('---')
-
         caller_frame_info = inspect.stack()[1]
-        global_frame_info = inspect.stack()[-1]
-        source = inspect.getsource(global_frame_info.frame)
-        source_lines = source.splitlines()
-        #print(source)
 
-        #print(caller_frame_info)
-        #print(caller_frame_info.lineno)
+        for module_frame_info in inspect.stack()[1:]:
+            if module_frame_info.function == '<module>':
+                break
+
+        source = inspect.getsource(module_frame_info.frame)
+        source_lines = source.splitlines()
+
         first_line = caller_frame_info.lineno
-        #print(source_lines[first_line])
         block_lines = []
 
+        (block_def,) = ast.parse(source_lines[first_line - 1].strip() + ' pass').body
+        assert isinstance(block_def, ast.With)
+        (block_item,) = block_def.items
+        block_args = block_item.optional_vars
+        assert isinstance(block_args, ast.Tuple)
+        self.block_arg_names = [name.id for name in block_args.elts]
+
         for i in itertools.count(first_line):
-            line = source_lines[i]
+            try:
+                line = source_lines[i]
+            except IndexError:
+                break
             code = textwrap.dedent('\n'.join(block_lines + [line]))
             if code.startswith(' '):
                 break
             block_lines.append(line)
 
-        #print(block_lines)
         block_source = textwrap.dedent('\n'.join(block_lines))
-        #print(block_source)
 
-        #tree = ast.parse(block_source)
-        #from pprint import pprint
-        #pprint(ast.dump(tree))
         self._code = compile(block_source, '<block>', 'exec')
 
-        raise Stop
+        return _BlockArguments()
 
-    def __exit__(self, *_):
-        return
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        ret = exc_type and issubclass(exc_type, _Stop)
+        if ret and self.exit_callable is not None:
+            self.exit_callable(self)
+        return ret
 
     def __call__(self, *args, **kwargs):
-        exec(self._code)
-
-#with Catch(), Block() as b1:
-with Catch(), (b1 := Block()):
-    print('test')
-    print('test2')
+        loc = locals() | kwargs | dict(zip(self.block_arg_names, args))
+        exec(self._code, locals=loc)
 
 
-def f():
-    with Catch(), (b2 := Block()):
-        print('foo')
-        print('bar')
-    return b2
+class Block(_Block):
+    def __init__(self):
+        super().__init__()
 
-block2 = f()
-print('end')
+    @staticmethod
+    def call(func, /, *args, **kwargs):
+        return _Block(partial(func, *args, **kwargs))
 
+
+def range_each(start, stop, block):
+    for i in range(start, stop):
+        block(i)
+
+
+with Block.call(range_each, 0, 10) as (i,):
+    print(i, '!')
+
+
+with Block.call(range_each, 0, 0) as (i,):
+    print(i, '?')
+
+
+with (block1 := Block()) as ():
+    print('block1 - foo')
+    print('block1 - bar')
+
+
+def get_block():
+    with (block := Block()) as ():
+        print('block2 - foo')
+        print('block2 - bar')
+    return block
+
+
+block2 = get_block()
+
+print('tests')
 block2()
-b1()
+block1()
+block2()
